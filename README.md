@@ -1,23 +1,51 @@
 # Remote Ports
 
-A [Herdr](https://herdr.dev) plugin. Open a port from a remote Herdr workspace
-on this laptop as:
+A [Herdr](https://herdr.dev) plugin. Forward a listener from a remote Herdr
+workspace onto this laptop as:
 
 ```text
 http://herdr.{workspace}.localhost:{port}
 ```
 
-The command is the `herdr-ports` binary (Rust). It uses native saved machines
-(`herdr machine add`). It does not wrap `herdr --remote`.
+Plugin id: `herdr.ports_forwarding`  
+Binary: `herdr-ports` (Rust)
 
-Forwards are stored in plugin state and kept on an SSH ControlMaster that is
-not in the picker process group. Closing the pane does not drop them. Herdr
-startup runs `herdr-ports restore`. The manager is a split pane, not a popup.
+It uses native saved machines (`herdr machine add`). It does not wrap
+`herdr --remote`.
+
+## Persist
+
+Tunnels are SSH `-L` forwards on a ControlMaster that:
+
+- lives under `/tmp/hp-<hash>` (short enough for macOS Unix sockets)
+- starts in a new session with SIGHUP ignored, so closing the manager pane
+  does not kill the mux
+- uses `ControlPersist=yes`
+- is recorded in plugin state
+- is restored by `./herdr-ports restore` on Herdr startup
+
+Closing the split pane or typing `q` only leaves the manager. The URL stays
+up until you toggle the row off, run `stop`, or reboot.
+
+## UI
+
+The manager is a **split pane**, not a popup.
+
+1. Select **Local** in the sidebar (the bind happens on this laptop).
+2. Run the pick action.
+3. Choose a machine, then a workspace.
+4. A row shows `ON` or `--`. The same number starts or stops that forward.
+
+`q` closes the pane. Empty Enter does nothing.
 
 ## Install
 
-Requires `cargo` (Rust) for the plugin build step.
+Needs `cargo` on the machine that installs the plugin.
 
+```bash
+herdr plugin install randomradio/herdr-ports --yes
+herdr server reload-config
+```
 
 ## Keybinding
 
@@ -31,29 +59,16 @@ description = "pick remote port"
 
 Reload config after install (global menu → `reload config`).
 
-## Use
-
-Select **Local** in the Herdr sidebar first. Plugin actions run on the selected
-server; SSH `-L` must bind on this laptop.
-
-1. `herdr machine add workbox --label workbox`
-2. Select Local
-3. Press the keybinding
-4. Choose a machine, then a workspace
-5. Type a port number to start or stop the forward (`ON` / `--`)
-
-The picker stays open so you can forward another port or stop one that is
-already on.
-
 ## CLI
 
-After install, the binary lives in the plugin root as `herdr-ports`.
+After install, `herdr-ports` is in the plugin root.
 
 ```bash
 ./herdr-ports scan workbox
 ./herdr-ports add workbox 8765 --open
 ./herdr-ports list
 ./herdr-ports stop 8765
+./herdr-ports restore
 ```
 
 ## Requirements
@@ -66,4 +81,11 @@ After install, the binary lives in the plugin root as `herdr-ports`.
 
 ## Marketplace
 
-GitHub topic `herdr-plugin`. Index: https://herdr.dev/plugins/
+Public GitHub repository with topic `herdr-plugin`. Herdr indexes that topic
+about every 30 minutes: https://herdr.dev/plugins/
+
+Install from GitHub:
+
+```bash
+herdr plugin install randomradio/herdr-ports --yes
+```
