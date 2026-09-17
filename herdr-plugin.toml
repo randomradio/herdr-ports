@@ -1,35 +1,41 @@
 id = "herdr.ports_forwarding"
 name = "Remote Ports"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"
 description = "Open a remote Herdr workspace port on this laptop as http://herdr.{workspace}.localhost:{port}."
 platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+[[build]]
+command = ["cp", "target/release/herdr-ports", "herdr-ports"]
 
 [[actions]]
 id = "pick"
 title = "Pick remote port"
 contexts = ["global", "workspace"]
-command = ["python3", "herdr_ports.py", "open-picker"]
+command = ["./herdr-ports", "open-picker"]
 
 [[actions]]
 id = "list"
 title = "List port forwards"
 contexts = ["global"]
-command = ["python3", "herdr_ports.py", "list"]
+command = ["./herdr-ports", "list"]
 
 [[actions]]
 id = "forward-url"
 title = "Forward localhost URL"
 contexts = ["global"]
-command = ["python3", "herdr_ports.py", "from-url"]
+command = ["./herdr-ports", "from-url"]
 
 [[panes]]
 id = "picker"
 title = "Remote ports"
 placement = "popup"
 width = "80%"
-height = 24
-command = ["python3", "herdr_ports.py", "pick"]
+height = 32
+command = ["./herdr-ports", "pick"]
 
 [[link_handlers]]
 id = "localhost"

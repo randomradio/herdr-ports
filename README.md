@@ -7,26 +7,19 @@ on this laptop as:
 http://herdr.{workspace}.localhost:{port}
 ```
 
-It uses native saved machines (`herdr machine add`). It does not wrap
-`herdr --remote`.
+The plugin command is the `herdr-ports` binary (Rust). It uses native saved
+machines (`herdr machine add`). It does not wrap `herdr --remote`.
 
 ## Install
+
+Requires `cargo` (Rust) for the plugin build step.
 
 ```bash
 herdr plugin install randomradio/herdr-ports --yes
 herdr server reload-config
 ```
 
-Or link a local checkout:
-
-```bash
-herdr plugin link /path/to/herdr-ports
-```
-
 ## Keybinding
-
-Add this to `~/.config/herdr/config.toml`, then reload config
-(global menu → `reload config`):
 
 ```toml
 [[keys.command]]
@@ -36,43 +29,41 @@ command = "herdr.ports_forwarding.pick"
 description = "pick remote port"
 ```
 
+Reload config after install (global menu → `reload config`).
+
 ## Use
 
-Plugin actions run on the selected Herdr server. SSH `-L` must bind on the
-laptop, so **select Local** before you pick a remote machine.
+Select **Local** in the Herdr sidebar first. Plugin actions run on the selected
+server; SSH `-L` must bind on this laptop.
 
-1. Save the host: `herdr machine add workbox --label workbox`
-2. In the TUI, select **Local**
-3. Press the keybinding (or `herdr plugin action invoke herdr.ports_forwarding.pick`)
-4. Choose **Local** or a saved machine
-5. Choose a workspace port
+1. `herdr machine add workbox --label workbox`
+2. Select Local
+3. Press the keybinding
+4. Choose a machine, then a workspace
+5. Type a port number to start or stop the forward (`ON` / `--`)
 
-The picker lists only listeners that belong to a Herdr workspace pane. It
-opens `http://herdr.{workspace}.localhost:{port}` in the browser.
-
-If the same local port is already held, the plugin does not steal it. Enter a
-free local port, or pick another remote port.
+The picker stays open so you can forward another port or stop one that is
+already on.
 
 ## CLI
 
+After install, the binary lives in the plugin root as `herdr-ports`.
+
 ```bash
-python3 herdr_ports.py scan Local
-python3 herdr_ports.py scan workbox
-python3 herdr_ports.py add workbox 8765 --open
-python3 herdr_ports.py list
-python3 herdr_ports.py stop 8765
+./herdr-ports scan workbox
+./herdr-ports add workbox 8765 --open
+./herdr-ports list
+./herdr-ports stop 8765
 ```
 
 ## Requirements
 
-- Herdr 0.9.0 or newer on this laptop
+- Herdr 0.9.0 or newer
 - macOS or Linux
-- `python3`
+- Rust/`cargo` to build
 - OpenSSH with key auth: `ssh -o BatchMode=yes <target> true`
 - `lsof` or `ss` on each scanned host
 
 ## Marketplace
 
-This repository has the GitHub topic `herdr-plugin`. The Herdr marketplace
-indexes public topic-tagged repos with a valid `herdr-plugin.toml` about every
-30 minutes: <https://herdr.dev/plugins/>
+GitHub topic `herdr-plugin`. Index: https://herdr.dev/plugins/
