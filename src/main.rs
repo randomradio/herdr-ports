@@ -91,6 +91,7 @@ fn run() -> Result<()> {
         "add" => cmd_add(&args[1..]),
         "list" => cmd_list(),
         "stop" => cmd_stop(&args[1..]),
+        "restore" => cmd_restore(),
         "open-picker" => cmd_open_picker(&args[1..]),
         "from-url" => cmd_from_url(),
         "help" | "--help" | "-h" => {
@@ -115,7 +116,9 @@ fn print_help() {
   add <machine> <port> [--local-port N] [--workspace NAME] [--open]
   list
   stop <local-port>
+  restore
 
+Forwards outlive the picker. Herdr startup runs restore.
 Select Local in the Herdr sidebar before picking a remote machine.
 "
     );
@@ -412,15 +415,32 @@ fn ensure_master(target: &str) -> Result<()> {
         "-o".into(),
         "ControlMaster=yes".into(),
         "-o".into(),
-        "ControlPersist=300".into(),
+        "ControlPersist=yes".into(),
         target.into(),
     ]);
     let args: Vec<&str> = start.iter().map(String::as_str).collect();
-    let (code, _, stderr) = run_cmd(&args, None)?;
+    let (code, _, stderr) = run_detached(&args)?;
     if code != 0 {
         bail!(stderr.trim().to_string());
     }
     Ok(())
+}
+
+fn run_detached(args: &[&str]) -> Result<(i32, String, String)> {
+    let mut cmd = Command::new(args[0]);
+    cmd.args(&args[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let output = cmd.output().with_context(|| args[0].to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    Ok((output.status.code().unwrap_or(1), stdout, stderr))
 }
 
 fn run_on(machine: &Machine, argv: &[&str], input: Option<&str>) -> Result<(i32, String, String)> {
@@ -973,6 +993,59 @@ fn cmd_stop(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn cmd_restore() -> Result<()> {
+    let items = load_forwards()?;
+    if items.is_empty() {
+        println!("No tracked forwards to restore.");
+        return Ok(());
+    }
+    let mut ok = 0usize;
+    for item in &items {
+        if item.target.is_empty() {
+            continue;
+        }
+        match restore_one(item) {
+            Ok(()) => {
+                ok += 1;
+                let label = if item.workspace_label.is_empty() {
+                    &item.label
+                } else {
+                    &item.workspace_label
+                };
+                println!(
+                    "ON {} -> {}",
+                    item.remote_port,
+                    workspace_url(label, item.local_port)
+                );
+            }
+            Err(err) => println!("skip {}:{}: {err:#}", item.label, item.remote_port),
+        }
+    }
+    println!("Restored {ok} forward(s).");
+    Ok(())
+}
+
+fn restore_one(item: &Forward) -> Result<()> {
+    ensure_master(&item.target)?;
+    if local_port_holder(item.local_port).is_some() {
+        return Ok(());
+    }
+    let mut args = ssh_base(&item.target)?;
+    args.extend([
+        "-O".into(),
+        "forward".into(),
+        "-L".into(),
+        spec(item.local_port, item.remote_port),
+        item.target.clone(),
+    ]);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, _, stderr) = run_cmd(&refs, None)?;
+    if code != 0 {
+        bail!(stderr.trim().to_string());
+    }
+    Ok(())
+}
+
 fn cmd_pick(args: &[String]) -> Result<()> {
     let mut wanted: Option<u16> = None;
     let mut selector: Option<String> = None;
@@ -1111,7 +1184,7 @@ fn cmd_open_picker(args: &[String]) -> Result<()> {
         "--entrypoint",
         "picker",
         "--placement",
-        "popup",
+        "split",
     ];
     let env_arg;
     if args.first().map(String::as_str) == Some("--port") && args.len() > 1 {

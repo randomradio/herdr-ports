@@ -1,6 +1,6 @@
 [package]
 name = "herdr-ports"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 description = "Forward a Herdr workspace port to herdr.{workspace}.localhost:{port}"

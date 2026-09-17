@@ -7,17 +7,17 @@ on this laptop as:
 http://herdr.{workspace}.localhost:{port}
 ```
 
-The plugin command is the `herdr-ports` binary (Rust). It uses native saved
-machines (`herdr machine add`). It does not wrap `herdr --remote`.
+The command is the `herdr-ports` binary (Rust). It uses native saved machines
+(`herdr machine add`). It does not wrap `herdr --remote`.
+
+Forwards are stored in plugin state and kept on an SSH ControlMaster that is
+not in the picker process group. Closing the pane does not drop them. Herdr
+startup runs `herdr-ports restore`. The manager is a split pane, not a popup.
 
 ## Install
 
 Requires `cargo` (Rust) for the plugin build step.
 
-```bash
-herdr plugin install randomradio/herdr-ports --yes
-herdr server reload-config
-```
 
 ## Keybinding
 
