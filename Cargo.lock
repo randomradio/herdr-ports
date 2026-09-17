@@ -73,9 +73,10 @@ dependencies = [
 
 [[package]]
 name = "herdr-ports"
-version = "0.2.1"
+version = "0.2.3"
 dependencies = [
  "anyhow",
+ "libc",
  "regex",
  "serde",
  "serde_json",

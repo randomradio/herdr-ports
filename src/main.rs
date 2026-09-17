@@ -403,45 +403,71 @@ fn ssh_base(target: &str) -> Result<Vec<String>> {
 }
 
 fn ensure_master(target: &str) -> Result<()> {
+    if master_alive(target)? {
+        return Ok(());
+    }
+    spawn_master(target)?;
+    for _ in 0..50 {
+        if master_alive(target)? {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    bail!("ssh master did not start for {target}");
+}
+
+fn master_alive(target: &str) -> Result<bool> {
     let mut check = ssh_base(target)?;
     check.extend(["-O".into(), "check".into(), target.into()]);
     let args: Vec<&str> = check.iter().map(String::as_str).collect();
-    if run_cmd(&args, None)?.0 == 0 {
-        return Ok(());
-    }
-    let mut start = ssh_base(target)?;
-    start.extend([
-        "-fN".into(),
-        "-o".into(),
-        "ControlMaster=yes".into(),
-        "-o".into(),
-        "ControlPersist=yes".into(),
-        target.into(),
-    ]);
-    let args: Vec<&str> = start.iter().map(String::as_str).collect();
-    let (code, _, stderr) = run_detached(&args)?;
-    if code != 0 {
-        bail!(stderr.trim().to_string());
-    }
-    Ok(())
+    Ok(run_cmd(&args, None)?.0 == 0)
 }
 
-fn run_detached(args: &[&str]) -> Result<(i32, String, String)> {
-    let mut cmd = Command::new(args[0]);
-    cmd.args(&args[1..])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+fn spawn_master(target: &str) -> Result<()> {
+    let control = control_path(target)?;
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-N",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        &format!("ControlPath={}", control.display()),
+        "-o",
+        "ControlMaster=yes",
+        "-o",
+        "ControlPersist=yes",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        target,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
     }
-    let output = cmd.output().with_context(|| args[0].to_string())?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    Ok((output.status.code().unwrap_or(1), stdout, stderr))
+    let child = cmd.spawn().context("ssh")?;
+    std::mem::forget(child);
+    Ok(())
 }
+
 
 fn run_on(machine: &Machine, argv: &[&str], input: Option<&str>) -> Result<(i32, String, String)> {
     if is_local(machine) {
