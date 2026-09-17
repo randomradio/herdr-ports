@@ -32,7 +32,7 @@ Add this to `~/.config/herdr/config.toml`, then reload config
 [[keys.command]]
 key = "prefix+shift+p"
 type = "plugin_action"
-command = "randomradio.ports.pick"
+command = "herdr.ports_forwarding.pick"
 description = "pick remote port"
 ```
 
@@ -43,7 +43,7 @@ laptop, so **select Local** before you pick a remote machine.
 
 1. Save the host: `herdr machine add workbox --label workbox`
 2. In the TUI, select **Local**
-3. Press the keybinding (or `herdr plugin action invoke randomradio.ports.pick`)
+3. Press the keybinding (or `herdr plugin action invoke herdr.ports_forwarding.pick`)
 4. Choose **Local** or a saved machine
 5. Choose a workspace port
 

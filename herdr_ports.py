@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
 
-PLUGIN_ID = "randomradio.ports"
+PLUGIN_ID = "herdr.ports_forwarding"
 LOCAL_ID = "local"
 SKIP_PROCESS_NAMES = {"sshd", "ssh", "herdr-ports"}
 SS_LINE = re.compile(
