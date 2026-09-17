@@ -369,8 +369,9 @@ fn local_port_holder(port: u16) -> Option<String> {
 }
 
 fn control_path(target: &str) -> Result<PathBuf> {
+    // macOS sockaddr_un.sun_path is 104 bytes. Herdr plugin state dirs are too long.
     let digest = hex_digest(target.as_bytes());
-    Ok(state_dir()?.join("ssh").join(&digest[..20]))
+    Ok(PathBuf::from("/tmp").join(format!("hp-{}", &digest[..12])))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
