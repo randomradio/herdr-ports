@@ -755,25 +755,11 @@ fn prompt(text: &str) -> Result<String> {
     io::stdout().flush()?;
     let mut line = String::new();
     if io::stdin().read_line(&mut line)? == 0 {
-        return Ok(String::new());
+        return Ok("q".into());
     }
     Ok(line.trim().to_string())
 }
 
-fn choose_index(len: usize, text: &str) -> Result<Option<usize>> {
-    loop {
-        let choice = prompt(text)?;
-        if choice.is_empty() || choice.eq_ignore_ascii_case("q") {
-            return Ok(None);
-        }
-        if let Ok(number) = choice.parse::<usize>() {
-            if (1..=len).contains(&number) {
-                return Ok(Some(number - 1));
-            }
-        }
-        println!("Invalid selection. Type a listed number, or q.");
-    }
-}
 
 fn format_ports(machine: &Machine, ports: &[WorkspacePort]) -> Result<String> {
     let mut lines = vec![format!("Machine: {}", machine.label)];
@@ -848,6 +834,25 @@ fn toggle_port(machine: &Machine, item: &WorkspacePort) -> Result<()> {
     Ok(())
 }
 
+fn choose_index(len: usize, text: &str) -> Result<Option<usize>> {
+    loop {
+        let choice = prompt(text)?;
+        if choice.eq_ignore_ascii_case("q") {
+            return Ok(None);
+        }
+        if choice.is_empty() {
+            continue;
+        }
+        if let Ok(number) = choice.parse::<usize>() {
+            if (1..=len).contains(&number) {
+                return Ok(Some(number - 1));
+            }
+        }
+        println!("Invalid selection. Type a listed number, or q.");
+        io::stdout().flush()?;
+    }
+}
+
 fn cmd_scan(args: &[String]) -> Result<()> {
     let json_out = args.iter().any(|a| a == "--json");
     let selector = args.iter().find(|a| a.as_str() != "--json");
@@ -855,7 +860,10 @@ fn cmd_scan(args: &[String]) -> Result<()> {
         bail!("scan [Local|machine]");
     };
     let machine = resolve_machine(selector)?;
-    let ports = merge_forwarded_ports(&machine, attribute_ports(&machine, &scan_listeners(&machine)?)?)?;
+    let ports = merge_forwarded_ports(
+        &machine,
+        attribute_ports(&machine, &scan_listeners(&machine)?)?,
+    )?;
     if json_out {
         let rows: Vec<Value> = ports
             .iter()
@@ -869,7 +877,10 @@ fn cmd_scan(args: &[String]) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&json!({"machine": machine.label, "ports": rows}))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"machine": machine.label, "ports": rows}))?
+        );
         return Ok(());
     }
     println!("{}", format_ports(&machine, &ports)?);
@@ -987,6 +998,7 @@ fn cmd_pick(args: &[String]) -> Result<()> {
             println!("  {}) {}  {}", index + 1, item.label, item.target);
         }
     }
+    io::stdout().flush()?;
     let machine = if let Some(selector) = selector {
         resolve_machine(&selector)?
     } else {
@@ -995,6 +1007,8 @@ fn cmd_pick(args: &[String]) -> Result<()> {
             None => return Ok(()),
         }
     };
+    println!("Loading {}...", machine.label);
+    io::stdout().flush()?;
     let workspaces = load_workspaces(&machine).unwrap_or_default();
     let mut workspace_id = None;
     let mut workspace_label = None;
@@ -1012,42 +1026,73 @@ fn cmd_pick(args: &[String]) -> Result<()> {
         }
     }
     loop {
-        let mut ports =
-            merge_forwarded_ports(&machine, attribute_ports(&machine, &scan_listeners(&machine)?)?)?;
-        if let (Some(id), Some(label)) = (&workspace_id, &workspace_label) {
-            ports.retain(|item| item.workspace_id == *id || item.workspace_label == *label);
-        }
+        let ports = match scan_listeners(&machine)
+            .and_then(|listeners| attribute_ports(&machine, &listeners))
+            .and_then(|ports| merge_forwarded_ports(&machine, ports))
+        {
+            Ok(mut ports) => {
+                if let (Some(id), Some(label)) = (&workspace_id, &workspace_label) {
+                    ports.retain(|item| {
+                        item.workspace_id == *id || item.workspace_label == *label
+                    });
+                }
+                ports
+            }
+            Err(err) => {
+                println!("Scan failed: {err:#}");
+                println!("The popup stays open. Enter rescan, or q to quit.");
+                io::stdout().flush()?;
+                let choice = prompt("q quits, anything else rescan: ")?;
+                if choice.eq_ignore_ascii_case("q") {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
         println!("{}", format_ports(&machine, &ports)?);
+        io::stdout().flush()?;
         if let Some(port) = wanted.take() {
             if let Some(item) = ports.iter().find(|item| item.port == port).cloned() {
-                toggle_port(&machine, &item)?;
+                if let Err(err) = toggle_port(&machine, &item) {
+                    println!("{err:#}");
+                }
             } else {
                 println!("No workspace listener on port {port}.");
             }
             continue;
         }
         if ports.is_empty() {
-            let choice = prompt("No ports. q quits, enter rescan: ")?;
-            if choice.is_empty() || choice.eq_ignore_ascii_case("q") {
+            let choice = prompt("No ports. q quits, anything else rescan: ")?;
+            if choice.eq_ignore_ascii_case("q") {
                 return Ok(());
             }
             continue;
         }
         let choice = prompt("Number to start/stop, or q: ")?;
-        if choice.is_empty() || choice.eq_ignore_ascii_case("q") {
+        if choice.eq_ignore_ascii_case("q") {
             return Ok(());
+        }
+        if choice.is_empty() {
+            continue;
         }
         let selected = if let Ok(number) = choice.parse::<usize>() {
             if (1..=ports.len()).contains(&number) {
                 Some(ports[number - 1].clone())
             } else {
-                ports.iter().find(|item| item.port.to_string() == choice).cloned()
+                ports
+                    .iter()
+                    .find(|item| item.port.to_string() == choice)
+                    .cloned()
             }
         } else {
             None
         };
         match selected {
-            Some(item) => toggle_port(&machine, &item)?,
+            Some(item) => {
+                if let Err(err) = toggle_port(&machine, &item) {
+                    println!("{err:#}");
+                }
+            }
             None => println!("Invalid selection. Type a listed number, or q."),
         }
     }
