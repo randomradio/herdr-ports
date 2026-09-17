@@ -1,0 +1,38 @@
+id = "randomradio.ports"
+name = "Remote Ports"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Open a remote Herdr workspace port on this laptop as http://herdr.{workspace}.localhost:{port}."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "pick"
+title = "Pick remote port"
+contexts = ["global", "workspace"]
+command = ["python3", "herdr_ports.py", "open-picker"]
+
+[[actions]]
+id = "list"
+title = "List port forwards"
+contexts = ["global"]
+command = ["python3", "herdr_ports.py", "list"]
+
+[[actions]]
+id = "forward-url"
+title = "Forward localhost URL"
+contexts = ["global"]
+command = ["python3", "herdr_ports.py", "from-url"]
+
+[[panes]]
+id = "picker"
+title = "Remote ports"
+placement = "popup"
+width = "80%"
+height = 24
+command = ["python3", "herdr_ports.py", "pick"]
+
+[[link_handlers]]
+id = "localhost"
+title = "Forward localhost URL"
+pattern = "^https?://(localhost|127\\.0\\.0\\.1|\\[::1\\]|herdr\\.[A-Za-z0-9.-]+\\.localhost)(:[0-9]+)?([/?#].*)?$"
+action = "forward-url"
