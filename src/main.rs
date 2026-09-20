@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 mod picker;
+mod sharing;
 
 const PLUGIN_ID: &str = "herdr.ports_forwarding";
 const LOCAL_ID: &str = "local";

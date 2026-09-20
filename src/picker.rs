@@ -34,6 +34,7 @@ enum Action {
     Back,
     Refresh,
     Open(usize),
+    Share(usize),
 }
 
 fn clipped(text: &str, width: usize) -> String {
@@ -118,7 +119,7 @@ fn select(
     let mut offset = 0;
     loop {
         let footer = if ports {
-            "↑↓ select · Space toggle · Enter/o open · r refresh · Esc back"
+            "↑↓ select · Space toggle · Enter open · t share · r refresh · Esc back"
         } else {
             "↑↓ select · Enter choose · r refresh · Esc back"
         };
@@ -146,6 +147,9 @@ fn select(
                     return Ok(Action::Open(*selected))
                 }
                 KeyCode::Char('r') => return Ok(Action::Refresh),
+                KeyCode::Char('t') if ports && !rows.is_empty() => {
+                    return Ok(Action::Share(*selected))
+                }
                 _ => {}
             },
             Event::Mouse(mouse) => match mouse.kind {
@@ -428,7 +432,89 @@ fn show_ports(
                 })();
                 notice = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
             }
+            Action::Share(i) => {
+                notice = share_port(machine, &cache.ports[i]).unwrap_or_else(|e| format!("{e:#}"));
+            }
             Action::Select(_) => {}
+        }
+    }
+}
+
+fn share_port(machine: &Machine, port: &WorkspacePort) -> Result<String> {
+    let local = if is_local(machine) {
+        port.port
+    } else {
+        let saved = existing_forward(machine, port.port)?
+            .context("Press Space to enable the SSH forward before sharing")?;
+        if !forward_alive(&saved)? {
+            bail!("Press Space to resume the SSH forward before sharing");
+        }
+        saved.local_port
+    };
+    let title = format!(
+        "Public share / {} / {}:{}",
+        machine.label, port.workspace_label, port.port
+    );
+    let mut tunnel: Option<sharing::Tunnel> = None;
+    let mut message =
+        "Anyone with the URL can access this service. No authentication is added.".to_owned();
+    let mut painted = None;
+    loop {
+        if let Some(active) = tunnel.as_mut() {
+            if let Err(error) = active.poll() {
+                message = format!("{error:#}");
+                tunnel = None;
+            }
+        }
+        let rows = vec![
+            format!("Origin: {}", workspace_url(&port.workspace_label, local)),
+            tunnel.as_ref().map_or_else(
+                || "Public sharing is off. Press y to start.".to_owned(),
+                |active| {
+                    active
+                        .url
+                        .clone()
+                        .unwrap_or_else(|| "Requesting public HTTPS URL…".to_owned())
+                },
+            ),
+            "Leaving this view stops public sharing. SSH forwarding stays active.".to_owned(),
+        ];
+        let state = (rows.clone(), message.clone(), terminal::size()?);
+        if painted.as_ref() != Some(&state) {
+            draw(
+                &title,
+                &rows,
+                1,
+                &message,
+                "y start · Enter/o open public URL · Esc/q stop and back",
+            )?;
+            painted = Some(state);
+        }
+        if !event::poll(std::time::Duration::from_millis(100))? {
+            continue;
+        }
+        if let Event::Key(key) = event::read()? {
+            if key.kind == KeyEventKind::Release {
+                continue;
+            }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => return Ok("Public sharing is off".into()),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok("Public sharing is off".into());
+                }
+                KeyCode::Char('y') if tunnel.is_none() => {
+                    tunnel = Some(sharing::Tunnel::start(local, &port.workspace_label)?);
+                    message =
+                        "Public access enabled. The URL may take a moment to become reachable."
+                            .into();
+                }
+                KeyCode::Enter | KeyCode::Char('o') => {
+                    if let Some(url) = tunnel.as_ref().and_then(|t| t.url.as_ref()) {
+                        open_browser(url)?;
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }

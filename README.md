@@ -20,9 +20,9 @@ The recording is a real session: a loopback service on `workmbp` (Tailscale
 opens SSH `-L`. [MP4](docs/demo.mp4) · [asciicast](docs/demo.cast) ·
 re-record with `docs/record-session.sh`.
 
-Version 0.3.0 adds a popup manager with cached lists, separate forwarding and
-browser actions, three-state status indicators, and discovery of detached
-workspace servers.
+Version 0.4.0 adds optional Cloudflare Quick Tunnels for temporary public HTTPS
+sharing. The popup keeps cached lists, separate forwarding and browser actions,
+three-state status indicators, and discovery of detached workspace servers.
 
 ## Persist
 
@@ -49,6 +49,8 @@ The manager opens in a **popup** without changing your pane layout.
 4. A row shows `○` (closed), `◐` (closed but saved), or `●` (saved and alive).
    Click a row to select it. Press Space to start, resume, or stop its forward.
    Enter or `o` opens its URL, including for local listeners.
+5. To share a service publicly, press `t`, then `y` to confirm. Escape stops
+   public sharing without stopping the SSH forward.
 
 Use arrow keys (or j/k) and the mouse wheel to select rows. Press Enter or `o` to open
 the selected URL, `r` to refresh, and Escape or `q` to go back. Escape or `q`
@@ -71,6 +73,33 @@ The hostname is a browser address for a loopback-only SSH forward. It does not
 provide HTTPS or separate port namespaces: two workspaces cannot use the same
 local port at once. If a port is occupied, choose another in the popup. The
 remote service must accept the workspace hostname in its HTTP Host header.
+
+## Public sharing with Cloudflare
+
+Select a port and press `t` to open the sharing view. Press `y` to confirm
+public access and start a Cloudflare Quick Tunnel. For a remote port, first
+press Space in the port list to enable its SSH forward. Local ports work directly.
+
+The view shows a temporary `https://….trycloudflare.com` URL. Enter or `o`
+opens that public URL. Escape or `q` stops the public tunnel and returns to
+the cached port list. The SSH forward stays active. Public tunnels are not
+saved or restored; keep the sharing view open while using the link.
+
+**Anyone with the URL can access the service.** The plugin adds no authentication.
+Share only services and data that you intend to make public.
+
+Install `cloudflared` on the host running the popup (on macOS:
+`brew install cloudflared`). No Cloudflare account is needed for Quick Tunnels.
+The plugin connects to `http://127.0.0.1:{local-port}` and sets the origin Host
+header to `herdr.{workspace}.localhost:{local-port}`. Your application must accept
+that header. The existing local workspace URL does not change.
+
+Quick Tunnels are for testing, not production: their URLs are temporary,
+they have a 200 concurrent-request limit, and they do not support SSE.
+A `.cloudflared/config.yaml` can prevent Quick Tunnels from working; the plugin
+does not change your Cloudflare configuration. Named tunnels, custom public
+domains, and Cloudflare Access configuration are not included.
+See [Cloudflare's Quick Tunnel documentation](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/).
 
 ## Discovery
 
@@ -143,6 +172,7 @@ After install, `herdr-ports` is in the plugin root.
 - OpenSSH with key auth: `ssh -o BatchMode=yes <target> true`
 - `lsof` or `ss` on each scanned host
 - `lsof` or `ss` on the local host to verify forwarding status
+- Optional: `cloudflared` on the popup host for public sharing
 
 ## Marketplace
 
