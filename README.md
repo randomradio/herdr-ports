@@ -13,6 +13,13 @@ Binary: `herdr-ports` (Rust)
 It uses native saved machines (`herdr machine add`). It does not wrap
 `herdr --remote`.
 
+![Forward a workmbp loopback port](docs/demo.gif)
+
+The recording is a real session: a loopback service on `workmbp` (Tailscale
+`chenyangzhaos-macbook-pro`) fails on this laptop until `herdr-ports add`
+opens SSH `-L`. [MP4](docs/demo.mp4) · [asciicast](docs/demo.cast) ·
+re-record with `docs/record-session.sh`.
+
 Version 0.3.0 adds a popup manager with cached lists, separate forwarding and
 browser actions, three-state status indicators, and discovery of detached
 workspace servers.
