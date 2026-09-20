@@ -1,12 +1,14 @@
 [package]
 name = "herdr-ports"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Forward a Herdr workspace port to herdr.{workspace}.localhost:{port}"
 
 [dependencies]
 anyhow = "1"
+crossterm = "0.29"
+unicode-width = "0.2"
 libc = "0.2"
 regex = "1"
 serde = { version = "1", features = ["derive"] }

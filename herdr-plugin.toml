@@ -1,6 +1,6 @@
 id = "herdr.ports_forwarding"
 name = "Remote Ports"
-version = "0.2.3"
+version = "0.3.0"
 min_herdr_version = "0.9.0"
 description = "Open a remote Herdr workspace port on this laptop as http://herdr.{workspace}.localhost:{port}."
 platforms = ["linux", "macos"]
@@ -35,7 +35,9 @@ command = ["./herdr-ports", "from-url"]
 [[panes]]
 id = "picker"
 title = "Remote ports"
-placement = "split"
+placement = "popup"
+width = "80%"
+height = "70%"
 command = ["./herdr-ports", "pick"]
 
 [[link_handlers]]

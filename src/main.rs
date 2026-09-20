@@ -11,6 +11,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod picker;
 
 const PLUGIN_ID: &str = "herdr.ports_forwarding";
 const LOCAL_ID: &str = "local";
@@ -87,7 +88,7 @@ fn run() -> Result<()> {
     }
     match args[0].as_str() {
         "scan" => cmd_scan(&args[1..]),
-        "pick" => cmd_pick(&args[1..]),
+        "pick" => picker::run(&args[1..]),
         "add" => cmd_add(&args[1..]),
         "list" => cmd_list(),
         "stop" => cmd_stop(&args[1..]),
@@ -194,7 +195,10 @@ fn load_forwards() -> Result<Vec<Forward>> {
 }
 
 fn save_forwards(items: &[Forward]) -> Result<()> {
-    fs::write(forwards_path()?, serde_json::to_string_pretty(items)? + "\n")?;
+    fs::write(
+        forwards_path()?,
+        serde_json::to_string_pretty(items)? + "\n",
+    )?;
     Ok(())
 }
 
@@ -279,10 +283,8 @@ fn parse_listeners(text: &str) -> Vec<Listener> {
 }
 
 fn parse_ss(text: &str) -> Vec<Listener> {
-    let re = Regex::new(
-        r"LISTEN\s+\S+\s+\S+\s+(\S+):(\d+)\s+\S+(?:\s+users:\(\((.+)\)\))?",
-    )
-    .unwrap();
+    let re =
+        Regex::new(r"LISTEN\s+\S+\s+\S+\s+(\S+):(\d+)\s+\S+(?:\s+users:\(\((.+)\)\))?").unwrap();
     let pid_re = Regex::new(r"pid=(\d+)").unwrap();
     text.lines()
         .filter_map(|line| {
@@ -468,7 +470,6 @@ fn spawn_master(target: &str) -> Result<()> {
     Ok(())
 }
 
-
 fn run_on(machine: &Machine, argv: &[&str], input: Option<&str>) -> Result<(i32, String, String)> {
     if is_local(machine) {
         return run_cmd(argv, input);
@@ -495,9 +496,7 @@ fn herdr_argv(machine: &Machine, args: &[&str]) -> Vec<String> {
 }
 
 fn parse_json_blob(text: &str) -> Result<Value> {
-    let start = text
-        .find('{')
-        .ok_or_else(|| anyhow!("no JSON object"))?;
+    let start = text.find('{').ok_or_else(|| anyhow!("no JSON object"))?;
     Ok(serde_json::from_str(&text[start..])?)
 }
 
@@ -521,9 +520,7 @@ fn herdr_result(machine: &Machine, args: &[&str]) -> Result<Value> {
 
 fn scan_listeners(machine: &Machine) -> Result<Vec<Listener>> {
     if is_local(machine) {
-        let (code, stdout, stderr) = if Path::new("/usr/sbin/lsof").exists()
-            || which("lsof")
-        {
+        let (code, stdout, stderr) = if Path::new("/usr/sbin/lsof").exists() || which("lsof") {
             run_cmd(&["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], None)?
         } else {
             run_cmd(&["ss", "-ltnpH"], None)?
@@ -557,9 +554,7 @@ fi
 
 fn which(name: &str) -> bool {
     env::var_os("PATH")
-        .map(|paths| {
-            env::split_paths(&paths).any(|dir| dir.join(name).exists())
-        })
+        .map(|paths| env::split_paths(&paths).any(|dir| dir.join(name).exists()))
         .unwrap_or(false)
 }
 
@@ -608,6 +603,7 @@ fn attribute_ports(machine: &Machine, listeners: &[Listener]) -> Result<Vec<Work
     }
     let panes = herdr_result(machine, &["pane", "list"])?;
     let mut pane_index: Vec<(HashSet<u32>, String, String)> = Vec::new();
+    let mut workspace_paths = Vec::new();
     if let Some(rows) = panes.get("panes").and_then(Value::as_array) {
         for pane in rows {
             let Some(pane_id) = pane.get("pane_id").and_then(Value::as_str) else {
@@ -618,6 +614,13 @@ fn attribute_ports(machine: &Machine, listeners: &[Listener]) -> Result<Vec<Work
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            for key in ["cwd", "foreground_cwd"] {
+                if let Some(path) = pane.get(key).and_then(Value::as_str) {
+                    if Path::new(path).is_absolute() && Path::new(path).parent().is_some() {
+                        workspace_paths.push((PathBuf::from(path), workspace_id.clone()));
+                    }
+                }
+            }
             let info = herdr_result(machine, &["pane", "process-info", "--pane", pane_id])?;
             let process_info = info.get("process_info").cloned().unwrap_or(info);
             let mut pids = HashSet::new();
@@ -643,13 +646,24 @@ fn attribute_ports(machine: &Machine, listeners: &[Listener]) -> Result<Vec<Work
     }
     let mut found = Vec::new();
     let mut seen = HashSet::new();
+    let paths = listener_paths(machine, listeners)?;
     for listener in listeners {
         let Some(pid) = listener.pid else { continue };
         let tree = ancestors(pid, &parents);
-        let matched = pane_index.iter().find(|(pids, _, _)| !pids.is_disjoint(&tree));
-        let Some((_, workspace_id, label)) = matched else {
+        let matched = pane_index
+            .iter()
+            .find(|(pids, _, _)| !pids.is_disjoint(&tree));
+        let workspace_id = if let Some((_, id, _)) = matched {
+            Some(id.clone())
+        } else {
+            paths
+                .get(&pid)
+                .and_then(|paths| workspace_for_paths(paths, &workspace_paths))
+        };
+        let Some(workspace_id) = workspace_id else {
             continue;
         };
+        let label = labels.get(&workspace_id).unwrap_or(&workspace_id);
         if !seen.insert((workspace_id.clone(), listener.port)) {
             continue;
         }
@@ -668,6 +682,74 @@ fn attribute_ports(machine: &Machine, listeners: &[Listener]) -> Result<Vec<Work
     Ok(found)
 }
 
+// Detached servers can outlive the pane that launched them. Use path evidence
+// only when ancestry cannot identify a workspace; ambiguous matches stay hidden.
+fn listener_paths(machine: &Machine, listeners: &[Listener]) -> Result<HashMap<u32, Vec<PathBuf>>> {
+    let pids = listeners
+        .iter()
+        .filter_map(|l| l.pid)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>();
+    if pids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let list = pids.join(",");
+    let space_list = pids.join(" ");
+    let script = format!(
+        "if command -v lsof >/dev/null 2>&1; then lsof -nP -a -p {list} -d cwd -Fn 2>/dev/null; else for pid in {space_list}; do printf 'p%s\\n' \"$pid\"; readlink /proc/$pid/cwd 2>/dev/null | sed 's/^/n/'; done; fi\nps -p {list} -o pid=,command=\n"
+    );
+    let (_, stdout, _) = run_on(machine, &["sh", "-s"], Some(&script))?;
+    let mut paths: HashMap<u32, Vec<PathBuf>> = HashMap::new();
+    let mut pid = None;
+    for line in stdout.lines() {
+        if let Some(value) = line.strip_prefix('p').and_then(|p| p.parse::<u32>().ok()) {
+            pid = Some(value);
+        } else if let Some(path) = line.strip_prefix("n/") {
+            if let Some(pid) = pid {
+                paths
+                    .entry(pid)
+                    .or_default()
+                    .push(PathBuf::from(format!("/{path}")));
+            }
+        } else if let Some((pid, command)) = line.trim_start().split_once(char::is_whitespace) {
+            if let (Ok(pid), Some(path)) = (pid.parse::<u32>(), python_server_directory(command)) {
+                paths.entry(pid).or_default().push(path);
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn python_server_directory(command: &str) -> Option<PathBuf> {
+    let args = command.split_whitespace().collect::<Vec<_>>();
+    if !args.windows(2).any(|pair| pair == ["-m", "http.server"]) {
+        return None;
+    }
+    let path = args
+        .windows(2)
+        .find(|pair| pair[0] == "--directory" || pair[0] == "-d")?[1];
+    Path::new(path).is_absolute().then(|| PathBuf::from(path))
+}
+
+fn workspace_for_paths(paths: &[PathBuf], workspaces: &[(PathBuf, String)]) -> Option<String> {
+    let matches = workspaces
+        .iter()
+        .filter(|(root, _)| paths.iter().any(|path| path.starts_with(root)))
+        .collect::<Vec<_>>();
+    let depth = matches
+        .iter()
+        .map(|(root, _)| root.components().count())
+        .max()?;
+    let ids = matches
+        .iter()
+        .filter(|(root, _)| root.components().count() == depth)
+        .map(|(_, id)| id.as_str())
+        .collect::<HashSet<_>>();
+    (ids.len() == 1).then(|| ids.into_iter().next().unwrap_or_default().to_owned())
+}
+
 fn spec(local_port: u16, remote_port: u16) -> String {
     format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}")
 }
@@ -680,7 +762,68 @@ fn existing_forward(machine: &Machine, remote_port: u16) -> Result<Option<Forwar
     }))
 }
 
-fn merge_forwarded_ports(machine: &Machine, mut ports: Vec<WorkspacePort>) -> Result<Vec<WorkspacePort>> {
+fn forward_alive(forward: &Forward) -> Result<bool> {
+    if forward.target.is_empty() {
+        return Ok(false);
+    }
+    let mut args = ssh_base(&forward.target)?;
+    args.extend(["-O".into(), "check".into(), forward.target.clone()]);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, _, stderr) = run_cmd(&refs, None)?;
+    if code != 0 {
+        return Ok(false);
+    }
+    let pid = stderr
+        .split_once("Master running (pid=")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .and_then(|(pid, _)| pid.parse::<u32>().ok())
+        .ok_or_else(|| anyhow!("Cannot read SSH master PID: {}", stderr.trim()))?;
+    // A busy port alone is insufficient: it must belong to this SSH master.
+    let listeners = if which("lsof") {
+        let (code, stdout, stderr) = run_cmd(
+            &[
+                "lsof",
+                "-nP",
+                "-a",
+                "-p",
+                &pid.to_string(),
+                &format!("-iTCP:{}", forward.local_port),
+                "-sTCP:LISTEN",
+            ],
+            None,
+        )?;
+        if code != 0 && !(code == 1 && stdout.is_empty() && stderr.is_empty()) {
+            bail!("Cannot inspect SSH listeners: {}", stderr.trim());
+        }
+        parse_lsof(&stdout)
+    } else {
+        let (code, stdout, stderr) = run_cmd(&["ss", "-ltnpH"], None)?;
+        if code != 0 {
+            bail!("Cannot inspect SSH listeners: {}", stderr.trim());
+        }
+        parse_ss(&stdout)
+    };
+    Ok(owns_forward_listener(&listeners, pid, forward.local_port))
+}
+
+fn owns_forward_listener(listeners: &[Listener], pid: u32, port: u16) -> bool {
+    listeners.iter().any(|listener| {
+        listener.pid == Some(pid) && listener.port == port && listener.addr == "127.0.0.1"
+    })
+}
+
+fn forward_symbol(forward: Option<&Forward>) -> Result<&'static str> {
+    match forward {
+        None => Ok("○"),
+        Some(forward) if forward_alive(forward)? => Ok("●"),
+        Some(_) => Ok("◐"),
+    }
+}
+
+fn merge_forwarded_ports(
+    machine: &Machine,
+    mut ports: Vec<WorkspacePort>,
+) -> Result<Vec<WorkspacePort>> {
     let mut have: HashSet<(String, u16)> = ports
         .iter()
         .map(|p| (p.workspace_label.clone(), p.port))
@@ -764,7 +907,11 @@ fn add_forward(
 
 fn stop_forward(local_port: u16) -> Result<()> {
     let items = load_forwards()?;
-    let Some(matched) = items.iter().find(|item| item.local_port == local_port).cloned() else {
+    let Some(matched) = items
+        .iter()
+        .find(|item| item.local_port == local_port)
+        .cloned()
+    else {
         bail!("No tracked forward on local port {local_port}");
     };
     if !matched.target.is_empty() {
@@ -777,7 +924,10 @@ fn stop_forward(local_port: u16) -> Result<()> {
             matched.target.clone(),
         ]);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let _ = run_cmd(&refs, None)?;
+        let (code, _, stderr) = run_cmd(&refs, None)?;
+        if code != 0 && forward_alive(&matched)? {
+            bail!("Cannot stop forward: {}", stderr.trim());
+        }
     }
     let rest: Vec<_> = items
         .into_iter()
@@ -793,20 +943,14 @@ fn open_browser(url: &str) -> Result<()> {
     } else {
         "xdg-open"
     };
-    let _ = Command::new(opener).arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    let _ = Command::new(opener)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
     Ok(())
 }
-
-fn prompt(text: &str) -> Result<String> {
-    print!("{text}");
-    io::stdout().flush()?;
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line)? == 0 {
-        return Ok("q".into());
-    }
-    Ok(line.trim().to_string())
-}
-
 
 fn format_ports(machine: &Machine, ports: &[WorkspacePort]) -> Result<String> {
     let mut lines = vec![format!("Machine: {}", machine.label)];
@@ -819,9 +963,10 @@ fn format_ports(machine: &Machine, ports: &[WorkspacePort]) -> Result<String> {
         "#", "ST", "WORKSPACE", "PORT", "PROCESS"
     ));
     for (index, item) in ports.iter().enumerate() {
-        let on = existing_forward(machine, item.port)?.is_some();
-        let st = if on { "ON" } else { "--" };
-        let url = workspace_url(&item.workspace_label, item.port).replacen("http://", "", 1);
+        let forward = existing_forward(machine, item.port)?;
+        let st = forward_symbol(forward.as_ref())?;
+        let local_port = forward.as_ref().map_or(item.port, |f| f.local_port);
+        let url = workspace_url(&item.workspace_label, local_port).replacen("http://", "", 1);
         lines.push(format!(
             "{:<4}{st:<4}{:<18}{:<8}{:<16}{url}",
             index + 1,
@@ -830,7 +975,7 @@ fn format_ports(machine: &Machine, ports: &[WorkspacePort]) -> Result<String> {
             item.process
         ));
     }
-    lines.push("Number starts or stops a forward. q quits.".into());
+    lines.push("○ closed  ◐ closed but saved  ● saved and alive".into());
     Ok(lines.join("\n"))
 }
 
@@ -852,54 +997,6 @@ fn load_workspaces(machine: &Machine) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
-fn toggle_port(machine: &Machine, item: &WorkspacePort) -> Result<()> {
-    if let Some(current) = existing_forward(machine, item.port)? {
-        stop_forward(current.local_port)?;
-        println!("Stopped {}", workspace_url(&item.workspace_label, current.local_port));
-        return Ok(());
-    }
-    let local_port = if let Some(holder) = local_port_holder(item.port) {
-        println!("Local {} is held by {holder}. Not stolen.", item.port);
-        let remap = prompt("Empty to skip, or a free local port: ")?;
-        if remap.is_empty() {
-            return Ok(());
-        }
-        remap.parse()?
-    } else {
-        item.port
-    };
-    if is_local(machine) && local_port == item.port {
-        let url = workspace_url(&item.workspace_label, item.port);
-        println!("Already local: {url}");
-        open_browser(&url)?;
-        return Ok(());
-    }
-    let forward = add_forward(machine, item.port, Some(local_port), &item.workspace_label)?;
-    let url = workspace_url(&item.workspace_label, forward.local_port);
-    println!("Forwarded -> {url}");
-    open_browser(&url)?;
-    Ok(())
-}
-
-fn choose_index(len: usize, text: &str) -> Result<Option<usize>> {
-    loop {
-        let choice = prompt(text)?;
-        if choice.eq_ignore_ascii_case("q") {
-            return Ok(None);
-        }
-        if choice.is_empty() {
-            continue;
-        }
-        if let Ok(number) = choice.parse::<usize>() {
-            if (1..=len).contains(&number) {
-                return Ok(Some(number - 1));
-            }
-        }
-        println!("Invalid selection. Type a listed number, or q.");
-        io::stdout().flush()?;
-    }
-}
-
 fn cmd_scan(args: &[String]) -> Result<()> {
     let json_out = args.iter().any(|a| a == "--json");
     let selector = args.iter().find(|a| a.as_str() != "--json");
@@ -914,16 +1011,21 @@ fn cmd_scan(args: &[String]) -> Result<()> {
     if json_out {
         let rows: Vec<Value> = ports
             .iter()
-            .map(|item| {
-                json!({
+            .map(|item| -> Result<Value> {
+                let forward = existing_forward(&machine, item.port)?;
+                let status = forward_symbol(forward.as_ref())?;
+                let local_port = forward.as_ref().map_or(item.port, |f| f.local_port);
+                Ok(json!({
                     "workspace": item.workspace_label,
                     "port": item.port,
                     "process": item.process,
-                    "url": workspace_url(&item.workspace_label, item.port),
-                    "forwarded": existing_forward(&machine, item.port).ok().flatten().is_some(),
-                })
+                    "url": workspace_url(&item.workspace_label, local_port),
+                    "saved": forward.is_some(),
+                    "forwarded": status == "●",
+                    "status": status,
+                }))
             })
-            .collect();
+            .collect::<Result<_>>()?;
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({"machine": machine.label, "ports": rows}))?
@@ -949,7 +1051,7 @@ fn cmd_list() -> Result<()> {
         };
         println!(
             "{:<4}{:<8}{:<8}{}",
-            "ON",
+            forward_symbol(Some(&item))?,
             item.local_port,
             item.remote_port,
             workspace_url(label, item.local_port)
@@ -960,7 +1062,9 @@ fn cmd_list() -> Result<()> {
 
 fn cmd_add(args: &[String]) -> Result<()> {
     if args.len() < 2 {
-        bail!("usage: herdr-ports add <machine> <port> [--local-port N] [--workspace NAME] [--open]");
+        bail!(
+            "usage: herdr-ports add <machine> <port> [--local-port N] [--workspace NAME] [--open]"
+        );
     }
     let selector = &args[0];
     let remote_port: u16 = args[1].parse()?;
@@ -1002,7 +1106,10 @@ fn cmd_add(args: &[String]) -> Result<()> {
         },
         forward.local_port,
     );
-    println!("Forwarded {}:{} -> {url}", machine.label, forward.remote_port);
+    println!(
+        "Forwarded {}:{} -> {url}",
+        machine.label, forward.remote_port
+    );
     if open {
         open_browser(&url)?;
     }
@@ -1039,7 +1146,8 @@ fn cmd_restore() -> Result<()> {
                     &item.workspace_label
                 };
                 println!(
-                    "ON {} -> {}",
+                    "{} {} -> {}",
+                    forward_symbol(Some(item))?,
                     item.remote_port,
                     workspace_url(label, item.local_port)
                 );
@@ -1052,9 +1160,12 @@ fn cmd_restore() -> Result<()> {
 }
 
 fn restore_one(item: &Forward) -> Result<()> {
-    ensure_master(&item.target)?;
-    if local_port_holder(item.local_port).is_some() {
+    if forward_alive(item)? {
         return Ok(());
+    }
+    ensure_master(&item.target)?;
+    if let Some(holder) = local_port_holder(item.local_port) {
+        bail!("Local port {} is held by {holder}.", item.local_port);
     }
     let mut args = ssh_base(&item.target)?;
     args.extend([
@@ -1072,132 +1183,6 @@ fn restore_one(item: &Forward) -> Result<()> {
     Ok(())
 }
 
-fn cmd_pick(args: &[String]) -> Result<()> {
-    let mut wanted: Option<u16> = None;
-    let mut selector: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--port" && i + 1 < args.len() {
-            wanted = Some(args[i + 1].parse()?);
-            i += 2;
-            continue;
-        }
-        if args[i].starts_with('-') {
-            bail!("unknown argument {}", args[i]);
-        }
-        selector = Some(args[i].clone());
-        i += 1;
-    }
-    let targets = load_targets()?;
-    println!("Forwards bind on THIS computer.");
-    println!("Targets:");
-    for (index, item) in targets.iter().enumerate() {
-        if item.target.is_empty() {
-            println!("  {}) {}", index + 1, item.label);
-        } else {
-            println!("  {}) {}  {}", index + 1, item.label, item.target);
-        }
-    }
-    io::stdout().flush()?;
-    let machine = if let Some(selector) = selector {
-        resolve_machine(&selector)?
-    } else {
-        match choose_index(targets.len(), "Select target number, or q: ")? {
-            Some(idx) => targets[idx].clone(),
-            None => return Ok(()),
-        }
-    };
-    println!("Loading {}...", machine.label);
-    io::stdout().flush()?;
-    let workspaces = load_workspaces(&machine).unwrap_or_default();
-    let mut workspace_id = None;
-    let mut workspace_label = None;
-    if !workspaces.is_empty() {
-        println!("Workspaces on {}:", machine.label);
-        for (index, (_id, label)) in workspaces.iter().enumerate() {
-            println!("  {}) {label}", index + 1);
-        }
-        match choose_index(workspaces.len(), "Select workspace number, or q: ")? {
-            Some(idx) => {
-                workspace_id = Some(workspaces[idx].0.clone());
-                workspace_label = Some(workspaces[idx].1.clone());
-            }
-            None => return Ok(()),
-        }
-    }
-    loop {
-        let ports = match scan_listeners(&machine)
-            .and_then(|listeners| attribute_ports(&machine, &listeners))
-            .and_then(|ports| merge_forwarded_ports(&machine, ports))
-        {
-            Ok(mut ports) => {
-                if let (Some(id), Some(label)) = (&workspace_id, &workspace_label) {
-                    ports.retain(|item| {
-                        item.workspace_id == *id || item.workspace_label == *label
-                    });
-                }
-                ports
-            }
-            Err(err) => {
-                println!("Scan failed: {err:#}");
-                println!("The popup stays open. Enter rescan, or q to quit.");
-                io::stdout().flush()?;
-                let choice = prompt("q quits, anything else rescan: ")?;
-                if choice.eq_ignore_ascii_case("q") {
-                    return Ok(());
-                }
-                continue;
-            }
-        };
-        println!("{}", format_ports(&machine, &ports)?);
-        io::stdout().flush()?;
-        if let Some(port) = wanted.take() {
-            if let Some(item) = ports.iter().find(|item| item.port == port).cloned() {
-                if let Err(err) = toggle_port(&machine, &item) {
-                    println!("{err:#}");
-                }
-            } else {
-                println!("No workspace listener on port {port}.");
-            }
-            continue;
-        }
-        if ports.is_empty() {
-            let choice = prompt("No ports. q quits, anything else rescan: ")?;
-            if choice.eq_ignore_ascii_case("q") {
-                return Ok(());
-            }
-            continue;
-        }
-        let choice = prompt("Number to start/stop, or q: ")?;
-        if choice.eq_ignore_ascii_case("q") {
-            return Ok(());
-        }
-        if choice.is_empty() {
-            continue;
-        }
-        let selected = if let Ok(number) = choice.parse::<usize>() {
-            if (1..=ports.len()).contains(&number) {
-                Some(ports[number - 1].clone())
-            } else {
-                ports
-                    .iter()
-                    .find(|item| item.port.to_string() == choice)
-                    .cloned()
-            }
-        } else {
-            None
-        };
-        match selected {
-            Some(item) => {
-                if let Err(err) = toggle_port(&machine, &item) {
-                    println!("{err:#}");
-                }
-            }
-            None => println!("Invalid selection. Type a listed number, or q."),
-        }
-    }
-}
-
 fn cmd_open_picker(args: &[String]) -> Result<()> {
     let bin = herdr_bin();
     let mut argv = vec![
@@ -1210,7 +1195,7 @@ fn cmd_open_picker(args: &[String]) -> Result<()> {
         "--entrypoint",
         "picker",
         "--placement",
-        "split",
+        "popup",
     ];
     let env_arg;
     if args.first().map(String::as_str) == Some("--port") && args.len() > 1 {
@@ -1258,10 +1243,8 @@ fn parse_localhost_port(url: &str) -> Option<u16> {
         (hostport, None)
     };
     let host = host.to_ascii_lowercase();
-    let ok = host == "localhost"
-        || host == "127.0.0.1"
-        || host == "::1"
-        || host.ends_with(".localhost");
+    let ok =
+        host == "localhost" || host == "127.0.0.1" || host == "::1" || host.ends_with(".localhost");
     if !ok {
         return None;
     }
@@ -1283,6 +1266,34 @@ mod tests {
     }
 
     #[test]
+    fn detached_http_server_matches_served_directory() {
+        let path = python_server_directory("/usr/bin/Python -m http.server 8765 --bind 127.0.0.1 --directory /Users/randomradio/mo/docs/topology").unwrap();
+        let roots = vec![(PathBuf::from("/Users/randomradio/mo"), "w1".into())];
+        assert_eq!(workspace_for_paths(&[path], &roots).as_deref(), Some("w1"));
+        assert_eq!(
+            workspace_for_paths(&[PathBuf::from("/Users/randomradio/src/mo")], &roots),
+            None
+        );
+        assert_eq!(
+            workspace_for_paths(&[PathBuf::from("/Users/randomradio/more")], &roots),
+            None
+        );
+        assert!(python_server_directory("node app.js --directory /Users/randomradio/mo").is_none());
+    }
+
+    #[test]
+    fn path_attribution_uses_specific_root_and_rejects_ambiguity() {
+        let paths = vec![PathBuf::from("/project/app/server")];
+        let mut roots = vec![
+            (PathBuf::from("/project"), "w1".into()),
+            (PathBuf::from("/project/app"), "w2".into()),
+        ];
+        assert_eq!(workspace_for_paths(&paths, &roots).as_deref(), Some("w2"));
+        roots.push((PathBuf::from("/project/app"), "w3".into()));
+        assert_eq!(workspace_for_paths(&paths, &roots), None);
+    }
+
+    #[test]
     fn parse_ss_skips_sshd() {
         let text = r#"
 LISTEN 0 4096 127.0.0.1:4242 0.0.0.0:* users:(("node",pid=2211,fd=23))
@@ -1293,6 +1304,18 @@ LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=1,fd=3))
         assert_eq!(listeners[0].port, 4242);
         assert_eq!(listeners[0].pid, Some(2211));
     }
+
+    #[test]
+    fn forward_listener_requires_matching_owner_address_and_port() {
+        let text = "ssh 2211 you 23u IPv4 0xabc 0t0 TCP 127.0.0.1:4242 (LISTEN)\n";
+        let listeners = parse_lsof(text);
+        assert!(owns_forward_listener(&listeners, 2211, 4242));
+        assert!(!owns_forward_listener(&listeners, 2212, 4242));
+        assert!(!owns_forward_listener(&listeners, 2211, 4243));
+        let ipv6 = parse_ss("LISTEN 0 128 [::1]:4242 [::]:* users:((\"ssh\",pid=2211,fd=23))");
+        assert!(!owns_forward_listener(&ipv6, 2211, 4242));
+        let ipv4 =
+            parse_ss("LISTEN 0 128 127.0.0.1:4242 0.0.0.0:* users:((\"ssh\",pid=2211,fd=23))");
+        assert!(owns_forward_listener(&ipv4, 2211, 4242));
+    }
 }
-
-
